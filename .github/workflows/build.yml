@@ -1,0 +1,190 @@
+# One runner per architecture; arm64 native, since QEMU takes hours here.
+name: Build and push
+
+on:
+  workflow_dispatch:
+    inputs:
+      anki_version:
+        description: Anki version to build. Blank means the latest release.
+        required: false
+        type: string
+  workflow_call:
+    inputs:
+      anki_version:
+        type: string
+        required: false
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: build-push
+  cancel-in-progress: false
+
+jobs:
+  version:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.pick.outputs.version }}
+      image: ${{ steps.pick.outputs.image }}
+      rust_version: ${{ steps.toolchain.outputs.rust_version }}
+    steps:
+      - name: Decide what to build
+        id: pick
+        env:
+          REQUESTED: ${{ inputs.anki_version }}
+        run: |
+          set -euo pipefail
+          version="${REQUESTED:-}"
+          if [ -z "$version" ]; then
+            # Releases, not tags: the repo carries betas and non-version tags.
+            version=$(curl -fsS --max-time 30 \
+              https://api.github.com/repos/ankitects/anki/releases/latest \
+              | jq -r '.tag_name')
+          fi
+          if [ -z "$version" ] || [ "$version" = "null" ]; then
+            echo "::error::Could not determine an Anki version to build"
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "image=ghcr.io/$(echo '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')/anki-sync-server" >> "$GITHUB_OUTPUT"
+          echo "::notice::Building Anki ${version}"
+
+      # cargo install --git ignores the rust-toolchain.toml in the source it
+      # fetches (rust-lang/cargo#11036), so read it here and pin the build
+      # image to it. Blank output leaves the Dockerfile default in charge.
+      - name: Read Anki's pinned Rust version
+        id: toolchain
+        env:
+          VERSION: ${{ steps.pick.outputs.version }}
+        run: |
+          set -euo pipefail
+          channel=$(curl -fsS --max-time 30 \
+            "https://raw.githubusercontent.com/ankitects/anki/${VERSION}/rust-toolchain.toml" \
+            | sed -n 's/^[[:space:]]*channel[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' \
+            | head -n1) || true
+          # Only a plain release number: stable/nightly have no rust: image tag.
+          if ! printf '%s' "${channel:-}" | grep -qE '^[0-9]+\.[0-9]+(\.[0-9]+)?$'; then
+            echo "::warning::No usable Rust pin in ${VERSION} (${channel:-none}); using the Dockerfile default"
+            channel=""
+          else
+            echo "::notice::Anki ${VERSION} pins Rust ${channel}"
+          fi
+          echo "rust_version=$channel" >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: version
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux/amd64
+            runner: ubuntu-latest
+          - platform: linux/arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Pushed by digest, tagged in the merge job, so the index is never
+      # half-published with an architecture missing.
+      - name: Build ${{ matrix.platform }}
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: ${{ matrix.platform }}
+          build-args: |
+            ANKI_VERSION=${{ needs.version.outputs.version }}
+            ${{ needs.version.outputs.rust_version && format('RUST_VERSION={0}', needs.version.outputs.rust_version) || '' }}
+          outputs: type=image,name=${{ needs.version.outputs.image }},push-by-digest=true,name-canonical=true,push=true
+          cache-from: type=gha,scope=${{ matrix.platform }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.platform }}
+
+      - name: Export digest
+        run: |
+          mkdir -p "${{ runner.temp }}/digests"
+          digest="${{ steps.build.outputs.digest }}"
+          touch "${{ runner.temp }}/digests/${digest#sha256:}"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: digest-${{ strategy.job-index }}
+          path: ${{ runner.temp }}/digests/*
+          retention-days: 1
+
+  merge:
+    needs: [version, build]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: ${{ runner.temp }}/digests
+          pattern: digest-*
+          merge-multiple: true
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Create the multi-architecture tags
+        working-directory: ${{ runner.temp }}/digests
+        env:
+          IMAGE: ${{ needs.version.outputs.image }}
+          VERSION: ${{ needs.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          docker buildx imagetools create \
+            -t "${IMAGE}:latest" \
+            -t "${IMAGE}:${VERSION}" \
+            $(printf "${IMAGE}@sha256:%s " *)
+
+      - name: Show what was published
+        env:
+          IMAGE: ${{ needs.version.outputs.image }}
+          VERSION: ${{ needs.version.outputs.version }}
+        run: |
+          docker buildx imagetools inspect "${IMAGE}:${VERSION}"
+          {
+            echo "### anki-sync-server ${VERSION}"
+            echo '```'
+            echo "${IMAGE}:latest"
+            echo "${IMAGE}:${VERSION}"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  readme:
+    needs: [version, merge]
+    if: github.ref_name == github.event.repository.default_branch
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: Point the README at the published version
+        env:
+          VERSION: ${{ needs.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          # Version-shaped tags only, so the :latest line survives untouched.
+          sed -i -E \
+            -e "s|(anki-sync-server:)[0-9][^\`[:space:]]*|\1${VERSION}|g" \
+            -e "s|(ANKI_VERSION=)[0-9][^ ]*|\1${VERSION}|g" \
+            README.md
+          if git diff --quiet -- README.md; then
+            echo "README already names ${VERSION}"
+            exit 0
+          fi
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git commit -m "Update README for Anki ${VERSION}" -- README.md
+          git push origin "HEAD:${GITHUB_REF_NAME}"

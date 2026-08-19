@@ -1,0 +1,96 @@
+# Rebuild when Anki releases a new version. What was built is read back from the
+# published image's version label, so there is no state to keep.
+name: Watch Anki releases
+
+on:
+  schedule:
+    - cron: '0 0 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: watch-anki
+  cancel-in-progress: false
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    outputs:
+      changed: ${{ steps.check.outputs.changed }}
+      version: ${{ steps.check.outputs.version }}
+    steps:
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Compare the latest release with what is published
+        id: check
+        run: |
+          set -euo pipefail
+          image="ghcr.io/$(echo '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')/anki-sync-server"
+
+          # Releases, not tags: the repo carries betas and non-version tags.
+          latest=$(curl -fsS --max-time 30 \
+            https://api.github.com/repos/ankitects/anki/releases/latest | jq -r '.tag_name')
+          if [ -z "$latest" ] || [ "$latest" = "null" ]; then
+            echo "::error::Could not read the latest Anki release"
+            exit 1
+          fi
+
+          # Nothing published yet fails here, which reads as "needs building".
+          built=$(docker buildx imagetools inspect "${image}:latest" --format '{{json .Image}}' 2>/dev/null \
+            | jq -r '[.. | objects | select(has("config")) | .config.Labels // {}
+                      | .["org.opencontainers.image.version"] // empty] | first // empty' 2>/dev/null || true)
+
+          echo "latest release : $latest"
+          echo "published image: ${built:-<nothing published yet>}"
+          echo "version=$latest" >> "$GITHUB_OUTPUT"
+
+          if [ "$built" = "$latest" ]; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::Already published ${latest}; nothing to build."
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+            echo "::notice::Anki ${latest} is out; rebuilding."
+          fi
+
+  publish:
+    needs: check
+    if: needs.check.outputs.changed == 'true'
+    uses: ./.github/workflows/build.yml
+    secrets: inherit
+    # A called workflow can only reduce what the calling job holds, and its
+    # readme job needs to push.
+    permissions:
+      contents: write
+      packages: write
+    with:
+      anki_version: ${{ needs.check.outputs.version }}
+
+  # Public repositories lose their cron after 60 days without activity, and
+  # Anki has gone quiet for longer than that four times since 2024 — the
+  # watcher would switch itself off exactly when nothing is being published.
+  keepalive:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: Commit if the repository has been quiet
+        run: |
+          set -euo pipefail
+          age=$(( ( $(date +%s) - $(git log -1 --format=%ct) ) / 86400 ))
+          echo "last commit: ${age} days ago"
+          if [ "$age" -lt 50 ]; then
+            exit 0
+          fi
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git commit --allow-empty -m 'Keep scheduled workflows enabled'
+          git push origin "HEAD:${GITHUB_REF_NAME}"
+          echo "::notice::Pushed a keepalive commit after ${age} quiet days"

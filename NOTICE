@@ -1,0 +1,16 @@
+This image contains the Anki sync server, which is not the work of this
+repository:
+
+  Anki — https://github.com/ankitects/anki
+  Copyright (C) Ankitects Pty Ltd and contributors
+  Licensed under the GNU Affero General Public License, version 3 or later
+
+The binary is compiled unmodified from the Anki source at the git tag recorded
+in the image's org.opencontainers.image.version label, by the Dockerfile in this
+repository. The complete corresponding source is the Anki repository at that
+tag.
+
+The Dockerfile and workflows here are licensed under the GNU Affero General
+Public License, version 3 or later. See LICENSE.
+
+This image is unofficial and is not endorsed by or affiliated with Ankitects.
