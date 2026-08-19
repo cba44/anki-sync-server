@@ -1,4 +1,4 @@
-# One runner per architecture; arm64 native, since QEMU takes hours here.
+# One runner per architecture; arm64 native rather than emulated.
 name: Build and push
 
 on:

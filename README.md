@@ -53,7 +53,7 @@ Two details are load-bearing and easy to lose:
 
 Each architecture is built on its own runner — `ubuntu-latest` and
 `ubuntu-24.04-arm` — and the two are merged into one manifest afterwards.
-Emulating a Rust build of this size takes hours; building it natively does not.
+Building natively rather than under emulation is what makes that worthwhile.
 
 To build locally for your own architecture:
 
@@ -61,10 +61,10 @@ To build locally for your own architecture:
 docker build --build-arg ANKI_VERSION=26.08.1 -t anki-sync-server:local .
 ```
 
-Expect roughly twenty minutes. `RUST_VERSION` in the Dockerfile is the pin for
-the default `ANKI_VERSION`; if you build a different version locally, pass the
-Rust version from that release's `rust-toolchain.toml` too. In CI that is
-automatic — the workflow reads it from the tag it is building.
+`RUST_VERSION` in the Dockerfile is the pin for the default `ANKI_VERSION`;
+if you build a different version locally, pass the Rust version from that
+release's `rust-toolchain.toml` too. In CI that is automatic — the workflow
+reads it from the tag it is building.
 
 ## Keeping up with Anki
 
