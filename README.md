@@ -6,7 +6,7 @@ manager, one static binary.
 
 ```
 ghcr.io/cba44/anki-sync-server:latest
-ghcr.io/cba44/anki-sync-server:26.08.1
+ghcr.io/cba44/anki-sync-server:26.09
 ```
 
 Built for [anki-sync-s3](https://github.com/cba44/anki-sync-s3), which adds a
@@ -58,7 +58,7 @@ Building natively rather than under emulation is what makes that worthwhile.
 To build locally for your own architecture:
 
 ```bash
-docker build --build-arg ANKI_VERSION=26.08.1 -t anki-sync-server:local .
+docker build --build-arg ANKI_VERSION=26.09 -t anki-sync-server:local .
 ```
 
 `RUST_VERSION` in the Dockerfile is the pin for the default `ANKI_VERSION`;
